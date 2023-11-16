@@ -3,10 +3,17 @@ const Allocator = std.mem.Allocator;
 
 const max_load_factor = 0.75;
 
+const State = enum {
+    empty,
+    marked,
+    deleted,
+};
+
 fn Entry(comptime V: type) type {
     return struct {
-        key: ?[]const u8,
-        value: ?V,
+        key: ?[]const u8 = null,
+        state: State = .empty,
+        value: ?V = null,
     };
 }
 
@@ -28,9 +35,15 @@ pub fn TinyHash(comptime V: type) type {
         }
 
         pub fn deinit(self: *@This()) void {
-            if (self.capacity != 0) {
-                self.allocator.free(self.entries);
-            }
+            if (self.capacity == 0) return;
+            self.allocator.free(self.entries);
+        }
+
+        pub fn get(self: *@This(), key: []const u8) ?*const V {
+            if (self.size == 0) return null;
+            const entry = self.findEntry(self.entries, self.capacity, key);
+            if (entry.state == .empty) return null;
+            return if (entry.value) |v| &v else null;
         }
 
         pub fn put(self: *@This(), key: []const u8, value: V) !bool {
@@ -40,30 +53,46 @@ pub fn TinyHash(comptime V: type) type {
             }
 
             var entry = self.findEntry(self.entries, self.capacity, key);
-            const is_new_key = entry.*.key == null;
-            if (is_new_key) {
+            const is_new_key = entry.state == .empty;
+            if (is_new_key and entry.state != .deleted) {
                 self.size += 1;
             }
 
             entry.key = key;
+            entry.state = .marked;
             entry.value = value;
 
             return is_new_key;
+        }
+
+        pub fn delete(self: *@This(), key: []const u8) !bool {
+            if (self.size == 0) return false;
+            var entry = self.findEntry(self.entries, self.capacity, key);
+            if (entry.state != .marked) return false;
+
+            entry.key = null;
+            entry.state = .deleted;
+            entry.value = null;
+            return true;
         }
 
         fn resize(self: *@This(), capacity: usize) !void {
             var entries = try self.allocator.alloc(E, capacity);
             for (entries) |*entry| {
                 entry.key = null;
+                entry.state = .empty;
                 entry.value = null;
             }
 
             if (self.size != 0) {
+                self.size = 0;
                 for (self.entries) |entry| {
-                    if (entry.key == null) continue;
+                    if (entry.state != .marked) continue;
                     var dest = self.findEntry(entries, capacity, entry.key.?);
                     dest.key = entry.key;
+                    dest.state = entry.state;
                     dest.value = entry.value;
+                    self.size += 1;
                 }
 
                 self.allocator.free(self.entries);
@@ -76,12 +105,23 @@ pub fn TinyHash(comptime V: type) type {
         fn findEntry(self: *@This(), entries: []E, capacity: usize, key: []const u8) *E {
             _ = self;
             var index: usize = hash(key) % capacity;
+            var tombstone: ?*E = null;
 
             while (true) {
                 const entry = &entries[index];
-                if (entry.key == null or std.mem.eql(u8, entry.key.?, key)) {
-                    return entry;
+
+                switch (entry.state) {
+                    .empty => {
+                        return tombstone orelse entry;
+                    },
+                    .deleted => {
+                        tombstone = entry;
+                    },
+                    .marked => {
+                        if (std.mem.eql(u8, entry.key.?, key)) return entry;
+                    },
                 }
+
                 index = (index + 1) % capacity;
             }
         }
@@ -103,16 +143,18 @@ fn hash(key: []const u8) u32 {
 }
 
 pub fn main() !void {
+    // TODO: write test cases
     var gpa = std.heap.GeneralPurposeAllocator(.{}){};
     var allocator = gpa.allocator();
-    defer {
-        _ = gpa.deinit();
-    }
+    defer _ = gpa.deinit();
 
     var map = TinyHash(u8).init(allocator);
     defer map.deinit();
 
     const key = "c";
+
+    _ = try map.put("bagel", 0);
+    _ = try map.put("biscuit", 0);
 
     _ = try map.put("a", 0);
     _ = try map.put("b", 1);
@@ -123,5 +165,28 @@ pub fn main() !void {
     _ = try map.put("f", 6);
     _ = try map.put("g", 7);
 
+    std.debug.print("capacity: {d} size: {d}\n", .{ map.capacity, map.size });
+
+    var val = map.get("a");
+    std.debug.print("a: {d}\n", .{val.?.*});
+
+    val = map.get("non-exist");
+    std.debug.print("?: {*}\n", .{val});
+
+    _ = try map.delete("a");
+    _ = try map.delete("b");
+    _ = try map.delete("c");
+    std.debug.print("capacity: {d} size: {d}\n", .{ map.capacity, map.size });
+    std.debug.print("a: {*}\n", .{map.get("a")});
+    std.debug.print("b: {*}\n", .{map.get("b")});
+    std.debug.print("c: {*}\n", .{map.get("c")});
+
+    _ = try map.put("h", 7);
+    _ = try map.put("i", 7);
+    _ = try map.put("j", 7);
+    _ = try map.put("k", 7);
+    _ = try map.put("l", 7);
+    _ = try map.put("m", 7);
+    _ = try map.put("n", 7);
     std.debug.print("capacity: {d} size: {d}\n", .{ map.capacity, map.size });
 }
